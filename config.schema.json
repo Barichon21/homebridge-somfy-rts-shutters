@@ -1,0 +1,75 @@
+{
+  "pluginAlias": "SomfyRTSShutters",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Controls Somfy RTS roller shutters through an RFXtrx433E dongle. Position (%) is simulated by timing up/down commands, so calibrate openDurationSeconds/closeDurationSeconds carefully for each shutter.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform name",
+        "type": "string",
+        "default": "Somfy RTS Shutters"
+      },
+      "tty": {
+        "title": "RFXCOM serial port",
+        "type": "string",
+        "placeholder": "/dev/cu.usbserial-0001",
+        "description": "Run `ls /dev/cu.*` after plugging the RFXCOM in to find the exact path. With the RFX-433EMC it may show up as /dev/cu.usbserial-0001, /dev/cu.SLAB_USBtoUART, /dev/cu.wchusbserial* or /dev/cu.usbmodem* depending on the USB chip.",
+        "required": true
+      },
+      "debug": {
+        "title": "Debug logging",
+        "type": "boolean",
+        "default": false
+      },
+      "shutters": {
+        "title": "Shutters",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "required": true
+            },
+            "deviceId": {
+              "title": "RFY device id",
+              "type": "string",
+              "placeholder": "0x0A1B2C/1",
+              "description": "Format 0xAABBCC/unitCode. Must be a code you paired with the shutter's motor beforehand (see scripts/pair.js).",
+              "required": true
+            },
+            "reversed": {
+              "title": "Reversed",
+              "type": "boolean",
+              "default": false,
+              "description": "Enable if 'up' closes the shutter instead of opening it."
+            },
+            "openDurationSeconds": {
+              "title": "Full open duration (seconds)",
+              "type": "number",
+              "default": 25,
+              "required": true,
+              "description": "Time for a full opening run, closed (0%) to open (100%) — measured on the shutter itself, regardless of which RF command triggers it."
+            },
+            "closeDurationSeconds": {
+              "title": "Full close duration (seconds)",
+              "type": "number",
+              "default": 25,
+              "required": true,
+              "description": "Time for a full closing run, open (100%) to closed (0%) — measured on the shutter itself, regardless of which RF command triggers it."
+            },
+            "forceCloseAtStartup": {
+              "title": "Force close at Homebridge startup",
+              "type": "boolean",
+              "default": false,
+              "description": "Sends a full close whenever Homebridge (re)starts, to keep the simulated position accurate over time."
+            }
+          }
+        }
+      }
+    }
+  }
+}

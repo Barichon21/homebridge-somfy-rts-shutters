@@ -1,7 +1,7 @@
 {
   "displayName": "Homebridge Somfy RTS Shutters (RFXCOM)",
   "name": "homebridge-somfy-rts-shutters",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Homebridge plugin exposing Somfy RTS roller shutters (via an RFXtrx433E dongle) as native HomeKit WindowCovering accessories. Converts the target position (%) into an up/down RTS command duration to simulate absolute positioning.",
   "license": "MIT",
   "main": "dist/index.js",

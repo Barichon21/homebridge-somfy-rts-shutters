@@ -31,8 +31,11 @@ interface PersistedState {
  */
 export class ShutterAccessory {
   private readonly service: Service;
-  private readonly rfy: typeof rfxcom.Rfy;
+  private readonly rfy?: typeof rfxcom.Rfy;
   private readonly shutter: ShutterConfig;
+  /** False when deviceId is malformed or the RFXtrx is unavailable: the accessory
+   *  stays visible in HomeKit but commands become no-ops instead of crashing. */
+  private readonly operational: boolean;
 
   private state: PersistedState;
 
@@ -94,6 +97,20 @@ export class ShutterAccessory {
         callback();
       });
 
+    const deviceIdOk = ShutterAccessory.isValidDeviceId(this.shutter.deviceId);
+    if (!deviceIdOk) {
+      this.platform.log.error(
+        `[${this.shutter.name}] Invalid deviceId "${this.shutter.deviceId}" — expected 0xID/unitCode with ` +
+        'ID between 0x00001 and 0xFFFFF and unitCode between 0 and 4 (RFY). Commands for this shutter are disabled.',
+      );
+    }
+    this.operational = deviceIdOk && this.platform.rfxcom !== undefined;
+
+    if (!this.operational) {
+      this.syncCharacteristics();
+      return;
+    }
+
     this.rfy = new rfxcom.Rfy(this.platform.rfxcom, rfxcom.rfy.RFY);
 
     this.platform.rfxcom.on('ready', () => {
@@ -122,6 +139,13 @@ export class ShutterAccessory {
   private setTargetPosition(value: CharacteristicValue, callback: CharacteristicSetCallback) {
     const target = Math.max(0, Math.min(100, +value));
     this.platform.log.debug(`[${this.shutter.name}] SET TargetPosition: ${target}`);
+
+    if (!this.operational) {
+      this.platform.log.warn(`[${this.shutter.name}] Ignoring TargetPosition ${target}: shutter is not operational (bad deviceId or RFXtrx unavailable).`);
+      this.state.targetPosition = this.state.currentPosition;
+      this.syncCharacteristics();
+      return callback();
+    }
 
     // If a move is already in progress, fold its elapsed progress into currentPosition
     // before computing the new one, instead of trusting the stale snapshot.
@@ -216,9 +240,28 @@ export class ShutterAccessory {
     return Math.max(0, Math.min(100, Math.round(this.moveStartPosition + signedDelta)));
   }
 
+  /** deviceId format: 0xID/unitCode — ID 0x00001-0xFFFFF, unitCode 0-4 (RFY subtype). */
+  private static isValidDeviceId(deviceId: string): boolean {
+    const match = /^0x([0-9A-Fa-f]{1,5})\/([0-9]{1,2})$/.exec(deviceId ?? '');
+    if (!match) {
+      return false;
+    }
+    const id = parseInt(match[1], 16);
+    const unitCode = parseInt(match[2], 10);
+    return id >= 0x00001 && id <= 0xfffff && unitCode >= 0 && unitCode <= 4;
+  }
+
   private sendCommand(command: RtsDirection | 'stop') {
+    if (!this.operational || !this.rfy) {
+      this.platform.log.warn(`[${this.shutter.name}] Ignoring "${command}": shutter is not operational (bad deviceId or RFXtrx unavailable).`);
+      return;
+    }
     this.platform.log.debug(`[${this.shutter.name}] RFY command: ${command} (${this.shutter.deviceId})`);
-    this.rfy.doCommand(this.shutter.deviceId, command);
+    try {
+      this.rfy.doCommand(this.shutter.deviceId, command);
+    } catch (err) {
+      this.platform.log.error(`[${this.shutter.name}] RFY command "${command}" failed:`, (err as Error)?.message ?? err);
+    }
   }
 
   private setPositionState(state: number) {

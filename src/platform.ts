@@ -40,27 +40,38 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
   public readonly Characteristic: typeof Characteristic = this.api.hap.Characteristic;
 
   public readonly accessories: PlatformAccessory[] = [];
-  public readonly rfxcom: typeof rfxcom.RfxCom;
+  public rfxcom?: typeof rfxcom.RfxCom;
 
   constructor(
     public readonly log: Logger,
     public readonly config: SomfyRTSPlatformConfig,
     public readonly api: API,
   ) {
+    // Never throw out of the constructor: an unhandled error here kills the whole
+    // (child) bridge. Without a serial port the platform stays idle instead.
     if (!this.config.tty) {
-      this.log.error('Missing "tty" in platform config: cannot start without the RFXtrx serial port.');
+      this.log.error('Missing "tty" in platform config: the plugin will stay idle until it is configured.');
+      return;
     }
 
-    this.rfxcom = new rfxcom.RfxCom(this.config.tty, {
-      debug: this.config.debug === true,
-    });
+    try {
+      this.rfxcom = new rfxcom.RfxCom(this.config.tty, {
+        debug: this.config.debug === true,
+      });
 
-    this.rfxcom.on('disconnect', () => this.log.error('ERROR: RFXtrx disconnected'));
-    this.rfxcom.on('connectfailed', () => this.log.error('ERROR: RFXtrx connection failed'));
+      this.rfxcom.on('disconnect', () => this.log.error('ERROR: RFXtrx disconnected'));
+      this.rfxcom.on('connectfailed', () =>
+        this.log.error(`ERROR: RFXtrx connection failed — check that ${this.config.tty} exists and is not in use`));
+      // Without an explicit listener, a serial-port 'error' event would crash the bridge.
+      this.rfxcom.on('error', (err: Error) => this.log.error('RFXtrx serial error:', err?.message ?? err));
 
-    this.rfxcom.initialise(() => {
-      this.log.info('RFXtrx initialised!');
-    });
+      this.rfxcom.initialise(() => {
+        this.log.info('RFXtrx initialised!');
+      });
+    } catch (err) {
+      this.log.error(`Could not open the RFXtrx on ${this.config.tty}:`, (err as Error)?.message ?? err);
+      this.rfxcom = undefined;
+    }
 
     this.api.on('didFinishLaunching', () => {
       this.discoverShutters();

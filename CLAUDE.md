@@ -45,8 +45,13 @@ envoie un `stop` au bon moment pour les positions intermédiaires.
   RFXtrx) : c'est le seul compatible avec ce plugin. Ne jamais flasher la variante
   WiFi/LAN/MQTT (l'USB deviendrait debug-only à 115200 bauds).
 - Firmware ≥ 4012 recommandé (les premiers 40xx avaient des soucis de connexion).
-- Port série macOS : puce non-FTDI, chercher via `ls /dev/cu.*` (peut être
-  `usbserial-0001`, `SLAB_USBtoUART`, `wchusbserial*`, `usbmodem*`).
+- **Boîtier réel identifié (2026-07-06, série 2025+)** : pont USB **FTDI FT231X**
+  (les notes « non-FTDI » valaient pour les séries 2024) devant l'ESP32-S3. Port macOS :
+  `/dev/cu.usbserial-D30FC2G8` — stable au reboot et au changement de prise (nom basé
+  sur le n° de série FTDI). Le get-status renvoie type de firmware `0x46`, inconnu de
+  node-rfxcom ≤ 2.6.2 (jan 2024) → la lib affiche « 1049 / Unknown firmware » ; c'est un
+  artefact, la vraie version est la release **4049** (série 40xx, nommage
+  RFX433USB_RFXEMC). Handshake série complet OK avec rfxcom@2.6.2.
 
 ## Checklist jour d'installation (détail complet dans README.md)
 

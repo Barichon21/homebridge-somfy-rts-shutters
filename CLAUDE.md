@@ -45,15 +45,19 @@ envoie un `stop` au bon moment pour les positions intermédiaires.
   RFXtrx) : c'est le seul compatible avec ce plugin. Ne jamais flasher la variante
   WiFi/LAN/MQTT (l'USB deviendrait debug-only à 115200 bauds).
 - Firmware ≥ 4012 recommandé (les premiers 40xx avaient des soucis de connexion).
-- **Boîtier réel branché le 2026-07-06 — identité exacte À CONFIRMER** (étiquette /
-  facture / prise : mini-USB = RFXtrx433E, USB-C = RFX-433EMC). Faits mesurés : pont
-  USB **FTDI FT231X**, port macOS `/dev/cu.usbserial-D30FC2G8` (stable au reboot — nom
-  basé sur le n° de série FTDI) ; get-status → version brute 49, type firmware `0x46`
-  inconnu de node-rfxcom ≤ 2.6.2 → affiché « 1049 / Unknown firmware ». Deux lectures :
-  RFXtrx433E classique avec firmware **Pro2 1049** (boîtier BEIGE rapporté par
-  l'utilisateur + FTDI → hypothèse la plus probable ; 0x46 = 0x40|0x06, 0x06 = Pro 2),
-  ou RFX-433EMC 2025+ avec release **4049**. Sans impact sur le projet : RFY/RTS
-  identique sur les deux, handshake série complet OK avec rfxcom@2.6.2.
+- **Boîtier confirmé RFX-433EMC** (2026-07-06) : mise à jour firmware par navigateur
+  réussie (Web Serial → impossible sur un RFXtrx433E/PIC), variante **USB**, release
+  **4050** active (affichée « 1050 / Unknown firmware » par node-rfxcom ≤ 2.6.2 qui ne
+  connaît pas le type `0x46` — artefact d'affichage, ne pas s'en inquiéter). Boîtier
+  beige (contrairement aux photos noires du site), pont USB **FTDI FT231X** devant
+  l'ESP32-S3. Port macOS : `/dev/cu.usbserial-D30FC2G8` — stable au reboot (nom = n° de
+  série FTDI). Après un flash, le boîtier attend un reset matériel : impulsion RTS/EN
+  type esptool via les lignes série (scripts de la session du 2026-07-06), ou
+  débranche/rebranche USB.
+- ⚠️ Le port série n'accepte qu'un seul maître : arrêter le child bridge Somfy avant
+  tout script direct (Homebridge le relance en ~1 s après un kill — utiliser une
+  ouverture en boucle pour gagner la course, ou couper Homebridge). Un onglet Chrome
+  Web Serial (flasher) verrouille le port en exclusif tant qu'il n'est pas fermé.
 
 ## Checklist jour d'installation (détail complet dans README.md)
 

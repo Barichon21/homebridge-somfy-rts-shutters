@@ -27,6 +27,12 @@ export interface ShutterConfig {
   closeDurationSeconds: number;
   /** Send a full "down" at Homebridge startup to guarantee a known (closed) position */
   forceCloseAtStartup?: boolean;
+  /**
+   * For a group accessory (one RFY remote paired on several motors): deviceIds of the
+   * member shutters. When the group moves, the members' simulated positions follow
+   * (no extra RF), and the group reflects the average of its members.
+   */
+  members?: string[];
 }
 
 export interface SomfyRTSPlatformConfig extends PlatformConfig {
@@ -41,6 +47,9 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
 
   public readonly accessories: PlatformAccessory[] = [];
   public rfxcom?: typeof rfxcom.RfxCom;
+
+  /** Live shutter handlers by deviceId — lets group accessories reach their members. */
+  public readonly shutterHandlers: Map<string, ShutterAccessory> = new Map();
 
   constructor(
     public readonly log: Logger,
@@ -86,6 +95,21 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
   configureAccessory(accessory: PlatformAccessory) {
     this.log.info('Loading accessory from cache:', accessory.displayName);
     this.accessories.push(accessory);
+  }
+
+  registerShutterHandler(deviceId: string, handler: ShutterAccessory) {
+    this.shutterHandlers.set(deviceId, handler);
+  }
+
+  shutterHandler(deviceId: string): ShutterAccessory | undefined {
+    return this.shutterHandlers.get(deviceId);
+  }
+
+  /** Called whenever a shutter's simulated state settles, so groups can re-average. */
+  notifyShutterSettled(deviceId: string) {
+    for (const handler of this.shutterHandlers.values()) {
+      handler.refreshFromMembers(deviceId);
+    }
   }
 
   private shutterUuid(shutter: ShutterConfig): string {

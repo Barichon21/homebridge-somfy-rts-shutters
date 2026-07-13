@@ -66,6 +66,12 @@
               "type": "boolean",
               "default": false,
               "description": "Sends a full close whenever Homebridge (re)starts, to keep the simulated position accurate over time."
+            },
+            "members": {
+              "title": "Group members (deviceIds)",
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "For a group remote paired on several motors: deviceIds of the member shutters. Their simulated positions follow every group command (no extra RF), and this accessory shows the average of its members."
             }
           }
         }

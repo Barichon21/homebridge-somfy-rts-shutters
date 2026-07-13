@@ -81,6 +81,9 @@ export class ShutterAccessory {
 
     accessory.context.state = this.state;
 
+    // Register even when not operational, so group membership stays resolvable.
+    this.platform.registerShutterHandler(this.shutter.deviceId, this);
+
     this.accessory
       .getService(this.platform.Service.AccessoryInformation)!
       .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Somfy')
@@ -167,6 +170,80 @@ export class ShutterAccessory {
       return callback();
     }
 
+    this.startSimulatedMove(target, true);
+
+    // A group accessory drives every motor with a single RF frame: mirror the
+    // movement on each member's simulation (no extra RF — the motors already obey).
+    this.forEachMember((member) => member.followMove(target));
+
+    callback();
+  }
+
+  /**
+   * Group support: mirror a movement commanded through a group remote. Updates this
+   * shutter's simulated position with its own calibrated timings, without emitting RF.
+   */
+  followMove(target: number) {
+    this.platform.log.debug(`[${this.shutter.name}] Following group move to ${target}%`);
+    this.startSimulatedMove(target, false);
+  }
+
+  /** Group support: mirror a HoldPosition/stop issued through a group remote. */
+  followStop() {
+    if (!this.moveTimeout) {
+      return;
+    }
+    clearTimeout(this.moveTimeout);
+    this.moveTimeout = undefined;
+    this.state.currentPosition = this.estimateCurrentPosition();
+    this.state.targetPosition = this.state.currentPosition;
+    this.moveIncreasing = null;
+    this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
+    this.syncCharacteristics(true);
+  }
+
+  /**
+   * Group support: when a member's state settles, a group accessory refreshes its own
+   * position to the average of its members (only while the group itself is idle).
+   */
+  refreshFromMembers(settledDeviceId: string) {
+    const members = this.shutter.members ?? [];
+    if (!members.includes(settledDeviceId) || this.moveTimeout) {
+      return;
+    }
+    const positions = members
+      .map((id) => this.platform.shutterHandler(id)?.simulatedPosition)
+      .filter((p): p is number => typeof p === 'number');
+    if (positions.length === 0) {
+      return;
+    }
+    const average = Math.round(positions.reduce((a, b) => a + b, 0) / positions.length);
+    if (average === this.state.currentPosition && average === this.state.targetPosition) {
+      return;
+    }
+    this.state.currentPosition = average;
+    this.state.targetPosition = average;
+    this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
+    this.syncCharacteristics(true);
+  }
+
+  get simulatedPosition(): number {
+    return this.state.currentPosition;
+  }
+
+  private forEachMember(fn: (member: ShutterAccessory) => void) {
+    for (const id of this.shutter.members ?? []) {
+      const member = this.platform.shutterHandler(id);
+      if (member && member !== this) {
+        fn(member);
+      } else if (!member) {
+        this.platform.log.warn(`[${this.shutter.name}] Unknown group member deviceId "${id}" — check the "members" list.`);
+      }
+    }
+  }
+
+  /** Shared movement engine; emitRf=false when mirroring a group command. */
+  private startSimulatedMove(target: number, emitRf: boolean) {
     // If a move is already in progress, fold its elapsed progress into currentPosition
     // before computing the new one, instead of trusting the stale snapshot.
     const wasMoving = this.moveTimeout !== undefined;
@@ -181,13 +258,13 @@ export class ShutterAccessory {
     if (this.state.currentPosition === target) {
       // The motor may still be physically running (target caught up with the
       // estimated position mid-move): it must be stopped explicitly.
-      if (wasMoving) {
+      if (wasMoving && emitRf) {
         this.sendCommand('stop');
       }
       this.moveIncreasing = null;
       this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
       this.syncCharacteristics(wasMoving);
-      return callback();
+      return;
     }
 
     // Logical travel (position increasing = opening) drives the duration and the
@@ -203,7 +280,9 @@ export class ShutterAccessory {
         : this.platform.Characteristic.PositionState.DECREASING,
     );
 
-    this.sendCommand(command);
+    if (emitRf) {
+      this.sendCommand(command);
+    }
 
     this.moveIncreasing = increasing;
     this.moveStartedAt = Date.now();
@@ -216,11 +295,10 @@ export class ShutterAccessory {
     // Somfy RTS motors have their own end-of-travel limit switches, so when the
     // target is a full open/close we don't need to (and shouldn't) send an explicit
     // "stop": we just let the full run finish and mark the state as STOPPED for HomeKit.
-    const sendStopCommand = target !== 0 && target !== 100;
+    const sendStopCommand = emitRf && target !== 0 && target !== 100;
     this.scheduleStop(moveDurationMs, target, sendStopCommand);
 
     this.syncCharacteristics();
-    callback();
   }
 
   private scheduleStop(delayMs: number, finalPosition: number, sendStopCommand = false) {
@@ -248,6 +326,9 @@ export class ShutterAccessory {
     this.moveIncreasing = null;
     this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
     this.syncCharacteristics(true);
+
+    // A group stop physically halts every member motor: freeze their simulations too.
+    this.forEachMember((member) => member.followStop());
   }
 
   private estimateCurrentPosition(): number {
@@ -296,6 +377,8 @@ export class ShutterAccessory {
     if (persist) {
       this.accessory.context.state = this.state;
       this.platform.api.updatePlatformAccessories([this.accessory]);
+      // Settled state: let group accessories re-average their members.
+      this.platform.notifyShutterSettled(this.shutter.deviceId);
     }
   }
 }

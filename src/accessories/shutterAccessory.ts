@@ -59,6 +59,26 @@ export class ShutterAccessory {
       targetPosition: 0,
       positionState: this.platform.Characteristic.PositionState.STOPPED,
     };
+
+    // Reconcile a state persisted in the middle of a move (Homebridge restarted while
+    // a shutter was running): the timers are gone, but an RTS motor keeps running
+    // until its end limit once commanded, so the best estimate is the extreme in the
+    // direction of travel. Without this, HomeKit shows "Opening…" forever.
+    const { INCREASING, DECREASING, STOPPED } = this.platform.Characteristic.PositionState;
+    if (this.state.positionState !== STOPPED || this.state.targetPosition !== this.state.currentPosition) {
+      const assumed =
+        this.state.positionState === INCREASING ? 100 :
+        this.state.positionState === DECREASING ? 0 :
+        this.state.currentPosition;
+      this.platform.log.warn(
+        `[${this.shutter.name}] Restored a mid-move state (restart during a run): assuming the motor ` +
+        `finished its travel at ${assumed}%.`,
+      );
+      this.state.currentPosition = assumed;
+      this.state.targetPosition = assumed;
+      this.state.positionState = STOPPED;
+    }
+
     accessory.context.state = this.state;
 
     this.accessory

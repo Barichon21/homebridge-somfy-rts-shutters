@@ -170,13 +170,38 @@ export class ShutterAccessory {
       return callback();
     }
 
-    this.startSimulatedMove(target, true);
+    const isGroup = (this.shutter.members?.length ?? 0) > 0;
+    const fullRun = target === 0 || target === 100;
 
-    // A group accessory drives every motor with a single RF frame: mirror the
-    // movement on each member's simulation (no extra RF — the motors already obey).
-    this.forEachMember((member) => member.followMove(target));
+    if (isGroup && !fullRun) {
+      // Intermediate group target: one shared RF frame + one shared stop cannot land
+      // members that start from different positions on the same percentage (motors all
+      // run for the same time). Dispatch individually instead: each member emits its
+      // own command and its own timed stop, so every one truly reaches the target.
+      // The group accessory only simulates (no RF) and re-averages as members settle.
+      this.startSimulatedMove(target, false);
+      this.forEachMember((member) => member.moveTo(target));
+    } else {
+      // Full runs (and non-group shutters): end limits make a single frame exact for
+      // every member regardless of starting position — keep the synchronized ballet.
+      this.startSimulatedMove(target, true);
+      this.forEachMember((member) => member.followMove(target));
+    }
 
     callback();
+  }
+
+  /**
+   * Group support: individually dispatched move — the member emits its own RF command
+   * and timed stop, so it genuinely reaches the requested position.
+   */
+  moveTo(target: number) {
+    if (!this.operational) {
+      this.platform.log.warn(`[${this.shutter.name}] Ignoring group-dispatched move to ${target}%: shutter is not operational.`);
+      return;
+    }
+    this.platform.log.debug(`[${this.shutter.name}] Group-dispatched move to ${target}%`);
+    this.startSimulatedMove(target, true);
   }
 
   /**
@@ -314,20 +339,32 @@ export class ShutterAccessory {
     }, delayMs);
   }
 
+  get isMoving(): boolean {
+    return this.moveTimeout !== undefined;
+  }
+
   private stopMovement() {
-    if (!this.moveTimeout) {
+    // For a group, members may be moving (individually dispatched) even when the
+    // group's own simulation is idle. Never send a stop when nothing moves at all:
+    // a stray RTS "stop" frame on an idle motor triggers its "my" favourite move.
+    const anyMemberMoving = (this.shutter.members ?? [])
+      .some((id) => this.platform.shutterHandler(id)?.isMoving === true);
+    if (!this.moveTimeout && !anyMemberMoving) {
       return;
     }
-    clearTimeout(this.moveTimeout);
-    this.moveTimeout = undefined;
+    if (this.moveTimeout) {
+      clearTimeout(this.moveTimeout);
+      this.moveTimeout = undefined;
+      this.state.currentPosition = this.estimateCurrentPosition();
+    }
     this.sendCommand('stop');
-    this.state.currentPosition = this.estimateCurrentPosition();
     this.state.targetPosition = this.state.currentPosition;
     this.moveIncreasing = null;
     this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
     this.syncCharacteristics(true);
 
-    // A group stop physically halts every member motor: freeze their simulations too.
+    // Freeze member simulations too — this also cancels their pending timed stops
+    // (which would otherwise land on stopped motors and trigger "my" moves).
     this.forEachMember((member) => member.followStop());
   }
 

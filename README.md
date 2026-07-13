@@ -21,8 +21,12 @@ firmware "RFX-433" séries 4000). Points vérifiés dans le
   simple port de debug (115200 bauds) et ce plugin ne pourra plus lui parler en USB.
 - ⚠️ Garde le firmware à jour (≥ 4012 recommandé par RFXCOM) ; les tout premiers
   firmwares 40xx ont causé des soucis de connexion dans d'autres intégrations.
-- ℹ️ Puce USB non-FTDI : sur macOS le port série peut apparaître sous un nom différent
-  de l'habituel `usbserial-XXXXXXXX` (voir plus bas).
+- ℹ️ Puce USB : les séries 2025+ embarquent un pont **FTDI FT231X** (port macOS
+  `usbserial-<numéroDeSérie>`, stable au redémarrage et au changement de prise) ; les
+  premières séries utilisaient d'autres puces (voir plus bas).
+- ℹ️ Affichage firmware : les bibliothèques `rfxcom` ≤ 2.6.2 ne connaissent pas le type
+  de firmware des séries récentes et affichent par ex. « 1050 / Unknown firmware » pour
+  une release **4050** réelle — artefact cosmétique sans conséquence.
 
 Basé sur la partie RFY de [homebridge-rfxcom-accessories](https://github.com/sylvainleroux/homebridge-rfxcom-accessories),
 réduit aux seuls volets (pas de capteurs météo, pas de switches on/off), avec :
@@ -60,11 +64,12 @@ Puis redémarrer Homebridge et ajouter la plateforme dans sa config (voir plus b
 ls /dev/cu.*
 ```
 
-Avec le RFX-433EMC (puce non-FTDI, base ESP32), le port peut apparaître comme
-`/dev/cu.usbserial-0001`, `/dev/cu.SLAB_USBtoUART`, `/dev/cu.wchusbserial*` ou
-`/dev/cu.usbmodem*` selon la puce embarquée. Compare la sortie de `ls /dev/cu.*`
-avant/après branchement pour identifier le bon. Les drivers CP210x/CH34x sont inclus
-dans macOS récent (Ventura+), rien à installer normalement sur le Mac Mini M1.
+Avec un RFX-433EMC série 2025+ (pont FTDI FT231X), le port apparaît comme
+`/dev/cu.usbserial-XXXXXXXX` — le suffixe est le numéro de série de la puce, donc **le
+nom est stable** au redémarrage et même en changeant de prise USB. Sur d'autres
+séries/puces, il peut apparaître comme `/dev/cu.SLAB_USBtoUART`, `/dev/cu.wchusbserial*`
+ou `/dev/cu.usbmodem*`. Compare la sortie de `ls /dev/cu.*` avant/après branchement
+pour identifier le bon ; les drivers usuels sont inclus dans macOS récent (Ventura+).
 
 ## Appairage des volets (⚠️ RFXmngr est Windows-only, inutilisable sur le Mac Mini)
 
@@ -132,24 +137,34 @@ node scripts/jog.js /dev/cu.usbserial-XXXXXXXX 0x0A1B2C/1 erase
       "debug": false,
       "shutters": [
         {
-          "name": "Salon",
-          "deviceId": "0x0A1B2C/1",
+          "name": "Volet Salon",
+          "deviceId": "0x00001/1",
           "reversed": false,
-          "openDurationSeconds": 25,
-          "closeDurationSeconds": 23,
+          "openDurationSeconds": 25.4,
+          "closeDurationSeconds": 23.8,
           "forceCloseAtStartup": false
         },
         {
-          "name": "Chambre",
-          "deviceId": "0x0A1B2C/2",
+          "name": "Volet Chambre",
+          "deviceId": "0x00001/2",
           "openDurationSeconds": 20,
           "closeDurationSeconds": 20
+        },
+        {
+          "name": "Tous les volets",
+          "deviceId": "0x00002/1",
+          "openDurationSeconds": 25.4,
+          "closeDurationSeconds": 23.8,
+          "members": ["0x00001/1", "0x00001/2"]
         }
       ]
     }
   ]
 }
 ```
+
+Les durées acceptent les décimales (précision au dixième de seconde recommandée pour
+des positions intermédiaires justes).
 
 ### `reversed`
 
@@ -159,6 +174,21 @@ appairage inversé). Important : `reversed` n'inverse **que** la commande RF env
 physique du volet — `openDurationSeconds` = durée d'une ouverture complète (0 % → 100 %),
 quel que soit le bouton qui la déclenche. Chronomètre donc toujours le volet, pas la
 commande.
+
+### Stores banne (awnings) : quelle convention choisir ?
+
+HomeKit affiche « Ouvert » à 100 %. Pour un store banne, deux conventions sont
+possibles — le plugin gère les deux, à toi de choisir :
+
+| Convention | « Ouvert » (100 %) = | Réglages |
+|---|---|---|
+| A | toile **déployée** | `reversed: true` (le déploiement se fait par la commande RF `down`), `openDurationSeconds` = durée de déploiement |
+| B | toile **repliée** (cohérent avec des volets roulants : « ouvert » = on voit le ciel) | `reversed: false`, `openDurationSeconds` = durée de repli |
+
+⚠️ Dans la convention B, « Fermer » **déploie** la toile : ne combine pas cette
+convention avec `forceCloseAtStartup` (chaque redémarrage de Homebridge sortirait le
+store). Pour la resynchronisation périodique, préfère une automatisation HomeKit
+quotidienne vers la position 100 %.
 
 ### Calibrer `openDurationSeconds` / `closeDurationSeconds`
 
@@ -174,6 +204,35 @@ réalité à chaque ouverture/fermeture complète.
 Si `true`, envoie un `down` complet à chaque démarrage de Homebridge pour garantir
 une position simulée fiable (utile si le drift s'accumule). Sinon, la dernière
 position connue est restaurée depuis le cache Homebridge.
+
+## Accessoires de groupe (`members`)
+
+Pour piloter plusieurs volets/stores d'un seul geste : appaire un deviceId dédié (ex.
+`0x00002/1`) sur **chacun** des moteurs concernés (même procédure PROG, répétée moteur
+par moteur), déclare-le comme un volet normal et liste ses membres :
+
+```json
+{ "name": "Tous les volets", "deviceId": "0x00002/1",
+  "openDurationSeconds": 25, "closeDurationSeconds": 24,
+  "members": ["0x00001/1", "0x00001/2"] }
+```
+
+Comportement (« dispatch hybride ») :
+
+- **Cible 0 % ou 100 %** : une **seule trame radio** part via la télécommande de groupe —
+  départ parfaitement synchrone, et les butées moteur garantissent l'exactitude quel que
+  soit le point de départ de chacun. Les membres suivent en simulation (aucune trame
+  supplémentaire).
+- **Cible intermédiaire (1-99 %)** : une trame de groupe unique ferait courir tous les
+  moteurs pendant la même durée — impossible d'amener des volets partis de positions
+  différentes au même pourcentage. Le plugin **commande alors chaque membre
+  individuellement** (sa trame, son stop chronométré avec ses durées) : chacun atteint
+  réellement la position demandée.
+- **HoldPosition sur le groupe** : un seul stop radio (la télécommande de groupe arrête
+  physiquement tous les moteurs), les simulations des membres se figent, et leurs stops
+  programmés sont annulés — jamais de trame « stop » sur un moteur à l'arrêt (elle
+  déclencherait sa position favorite « my »).
+- Quand un membre bouge individuellement, le groupe affiche la **moyenne** de ses membres.
 
 ## Limites connues
 

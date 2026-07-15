@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 (2026-07-15)
+
+- `config.schema.json` conforme au standard JSON Schema : les `"required": true` par
+  champ (ancien style Homebridge) sont remplacés par des tableaux `required` au niveau
+  objet — signalé par le bot de vérification Homebridge.
+
 ## 0.3.1 (2026-07-14)
 
 - Observabilité : les réponses du RFXtrx à chaque commande sont désormais corrélées au

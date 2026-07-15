@@ -15,8 +15,7 @@
         "title": "RFXCOM serial port",
         "type": "string",
         "placeholder": "/dev/cu.usbserial-0001",
-        "description": "Run `ls /dev/cu.*` after plugging the RFXCOM in to find the exact path. With the RFX-433EMC it may show up as /dev/cu.usbserial-0001, /dev/cu.SLAB_USBtoUART, /dev/cu.wchusbserial* or /dev/cu.usbmodem* depending on the USB chip.",
-        "required": true
+        "description": "Run `ls /dev/cu.*` after plugging the RFXCOM in to find the exact path. With the RFX-433EMC it may show up as /dev/cu.usbserial-0001, /dev/cu.SLAB_USBtoUART, /dev/cu.wchusbserial* or /dev/cu.usbmodem* depending on the USB chip."
       },
       "debug": {
         "title": "Debug logging",
@@ -31,15 +30,13 @@
           "properties": {
             "name": {
               "title": "Name",
-              "type": "string",
-              "required": true
+              "type": "string"
             },
             "deviceId": {
               "title": "RFY device id",
               "type": "string",
               "placeholder": "0x0A1B2C/1",
-              "description": "Format 0xAABBCC/unitCode. Must be a code you paired with the shutter's motor beforehand (see scripts/pair.js).",
-              "required": true
+              "description": "Format 0xAABBCC/unitCode. Must be a code you paired with the shutter's motor beforehand (see scripts/pair.js)."
             },
             "reversed": {
               "title": "Reversed",
@@ -51,14 +48,12 @@
               "title": "Full open duration (seconds)",
               "type": "number",
               "default": 25,
-              "required": true,
               "description": "Time for a full opening run, closed (0%) to open (100%) — measured on the shutter itself, regardless of which RF command triggers it."
             },
             "closeDurationSeconds": {
               "title": "Full close duration (seconds)",
               "type": "number",
               "default": 25,
-              "required": true,
               "description": "Time for a full closing run, open (100%) to closed (0%) — measured on the shutter itself, regardless of which RF command triggers it."
             },
             "forceCloseAtStartup": {
@@ -70,12 +65,23 @@
             "members": {
               "title": "Group members (deviceIds)",
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "For a group remote paired on several motors: deviceIds of the member shutters. Their simulated positions follow every group command (no extra RF), and this accessory shows the average of its members."
             }
-          }
+          },
+          "required": [
+            "name",
+            "deviceId",
+            "openDurationSeconds",
+            "closeDurationSeconds"
+          ]
         }
       }
-    }
+    },
+    "required": [
+      "tty"
+    ]
   }
 }

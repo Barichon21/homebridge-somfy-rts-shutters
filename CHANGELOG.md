@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 (2026-07-14)
+
+- Observabilité : les réponses du RFXtrx à chaque commande sont désormais corrélées au
+  volet émetteur et loguées — ACK en debug, absence de confirmation en warning nuancé,
+  refus (« Unknown RFY remote ID », NAK…) en warning explicite « le moteur n'a pas reçu
+  cet ordre ». Les pannes silencieuses (volet désappairé, trame perdue) deviennent
+  visibles d'un coup d'œil dans les logs Homebridge.
+
 ## 0.3.0 (2026-07-13)
 
 - **Groupes : dispatch hybride.** Cible intermédiaire (1-99 %) → chaque membre est

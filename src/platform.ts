@@ -51,6 +51,10 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
   /** Live shutter handlers by deviceId — lets group accessories reach their members. */
   public readonly shutterHandlers: Map<string, ShutterAccessory> = new Map();
 
+  /** Commands awaiting the box's response, keyed by RFXtrx sequence number, so that
+   *  responses can be attributed to the shutter that sent them in the logs. */
+  private readonly pendingCommands: Map<number, { shutter: string; command: string; sentAt: number }> = new Map();
+
   constructor(
     public readonly log: Logger,
     public readonly config: SomfyRTSPlatformConfig,
@@ -73,6 +77,22 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
         this.log.error(`ERROR: RFXtrx connection failed — check that ${this.config.tty} exists and is not in use`));
       // Without an explicit listener, a serial-port 'error' event would crash the bridge.
       this.rfxcom.on('error', (err: Error) => this.log.error('RFXtrx serial error:', err?.message ?? err));
+
+      // Surface the box's per-command responses. Silent non-ACKs (unknown remote id,
+      // NAK, missing acknowledgements) previously made failures invisible: a shutter
+      // would simply not move while the plugin believed everything was fine.
+      this.rfxcom.on('response', (message: string, seqnbr: number, responseCode: number) => {
+        const pending = this.pendingCommands.get(seqnbr);
+        this.pendingCommands.delete(seqnbr);
+        const origin = pending ? `[${pending.shutter}] RFY "${pending.command}"` : `RFY command (seq ${seqnbr})`;
+        if (responseCode === 0 || responseCode === 1) {
+          this.log.debug(`${origin} → ${message}`);
+        } else if (responseCode === 6) {
+          this.log.warn(`${origin} → no confirmation from the RFXtrx (${message}) — the frame may or may not have been transmitted.`);
+        } else {
+          this.log.warn(`${origin} → NOT transmitted: ${message} (code ${responseCode}) — the motor did not receive this order.`);
+        }
+      });
 
       this.rfxcom.initialise(() => {
         this.log.info('RFXtrx initialised!');
@@ -99,6 +119,17 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
 
   registerShutterHandler(deviceId: string, handler: ShutterAccessory) {
     this.shutterHandlers.set(deviceId, handler);
+  }
+
+  /** Remember which shutter sent the command carrying this sequence number. */
+  registerPendingCommand(seqnbr: number, shutter: string, command: string) {
+    const now = Date.now();
+    for (const [key, value] of this.pendingCommands) {
+      if (now - value.sentAt > 60000) {
+        this.pendingCommands.delete(key);
+      }
+    }
+    this.pendingCommands.set(seqnbr, { shutter, command, sentAt: now });
   }
 
   shutterHandler(deviceId: string): ShutterAccessory | undefined {

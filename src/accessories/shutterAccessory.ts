@@ -396,7 +396,10 @@ export class ShutterAccessory {
     }
     this.platform.log.debug(`[${this.shutter.name}] RFY command: ${command} (${this.shutter.deviceId})`);
     try {
-      this.rfy.doCommand(this.shutter.deviceId, command);
+      const seqnbr = this.rfy.doCommand(this.shutter.deviceId, command);
+      if (typeof seqnbr === 'number') {
+        this.platform.registerPendingCommand(seqnbr, this.shutter.name, command);
+      }
     } catch (err) {
       this.platform.log.error(`[${this.shutter.name}] RFY command "${command}" failed:`, (err as Error)?.message ?? err);
     }

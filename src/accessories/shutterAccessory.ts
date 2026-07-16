@@ -7,7 +7,7 @@ import {
 } from 'homebridge';
 import rfxcom from 'rfxcom';
 
-import { SomfyRTSShuttersPlatform, ShutterConfig } from '../platform';
+import { CommandOutcome, SomfyRTSShuttersPlatform, ShutterConfig } from '../platform';
 
 type RtsDirection = 'up' | 'down';
 
@@ -47,6 +47,17 @@ export class ShutterAccessory {
    *  estimation must never be derived from the command direction. */
   private moveIncreasing: boolean | null = null;
   private moveFullDurationSeconds = 0;
+  /** Bumped on every state-machine transition: in-flight response hooks (ACK anchor,
+   *  retry, rollback) check it so a superseded move can no longer mutate the state. */
+  private moveGeneration = 0;
+  /** True while the last command definitively failed to transmit (StatusFault). */
+  private fault = false;
+  /** Pending timers of a paced group dispatch, cancellable by Hold or a new command. */
+  private dispatchTimers: ReturnType<typeof setTimeout>[] = [];
+  /** A movement frame is in flight, awaiting the box's ACK (run timer not started). */
+  private pendingAck = false;
+  /** Safety net while waiting for an ACK: a mute box must not freeze the accessory. */
+  private ackFallbackTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     private readonly platform: SomfyRTSShuttersPlatform,
@@ -120,6 +131,12 @@ export class ShutterAccessory {
         callback();
       });
 
+    // Optional StatusFault: raised when a command definitively failed to transmit
+    // (after retries), cleared on the next confirmed transmission. 0=no fault, 1=fault.
+    this.service
+      .getCharacteristic(this.platform.Characteristic.StatusFault)
+      .on('get', (callback: CharacteristicGetCallback) => callback(null, this.fault ? 1 : 0));
+
     const deviceIdOk = ShutterAccessory.isValidDeviceId(this.shutter.deviceId);
     if (!deviceIdOk) {
       this.platform.log.error(
@@ -173,14 +190,22 @@ export class ShutterAccessory {
     const isGroup = (this.shutter.members?.length ?? 0) > 0;
     const fullRun = target === 0 || target === 100;
 
+    this.clearDispatchTimers();
+
     if (isGroup && !fullRun) {
       // Intermediate group target: one shared RF frame + one shared stop cannot land
       // members that start from different positions on the same percentage (motors all
       // run for the same time). Dispatch individually instead: each member emits its
       // own command and its own timed stop, so every one truly reaches the target.
       // The group accessory only simulates (no RF) and re-averages as members settle.
+      // Dispatches are paced 250 ms apart so the box's transmit queue never piles up
+      // (harmless for precision: each member's clock starts on its own ACK).
       this.startSimulatedMove(target, false);
-      this.forEachMember((member) => member.moveTo(target));
+      let delayMs = 0;
+      this.forEachMember((member) => {
+        this.dispatchTimers.push(setTimeout(() => member.moveTo(target), delayMs));
+        delayMs += 250;
+      });
     } else {
       // Full runs (and non-group shutters): end limits make a single frame exact for
       // every member regardless of starting position — keep the synchronized ballet.
@@ -215,12 +240,18 @@ export class ShutterAccessory {
 
   /** Group support: mirror a HoldPosition/stop issued through a group remote. */
   followStop() {
-    if (!this.moveTimeout) {
+    const hadIntent = this.moveTimeout !== undefined || this.pendingAck;
+    this.moveGeneration++;
+    this.clearAckFallback();
+    this.pendingAck = false;
+    if (!hadIntent) {
       return;
     }
-    clearTimeout(this.moveTimeout);
-    this.moveTimeout = undefined;
-    this.state.currentPosition = this.estimateCurrentPosition();
+    if (this.moveTimeout) {
+      clearTimeout(this.moveTimeout);
+      this.moveTimeout = undefined;
+      this.state.currentPosition = this.estimateCurrentPosition();
+    }
     this.state.targetPosition = this.state.currentPosition;
     this.moveIncreasing = null;
     this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
@@ -269,24 +300,31 @@ export class ShutterAccessory {
 
   /** Shared movement engine; emitRf=false when mirroring a group command. */
   private startSimulatedMove(target: number, emitRf: boolean) {
+    this.moveGeneration++;
+    const generation = this.moveGeneration;
+    this.clearAckFallback();
+
     // If a move is already in progress, fold its elapsed progress into currentPosition
     // before computing the new one, instead of trusting the stale snapshot.
     const wasMoving = this.moveTimeout !== undefined;
+    const wasPending = this.pendingAck;
+    this.pendingAck = false;
     if (this.moveTimeout) {
       this.state.currentPosition = this.estimateCurrentPosition();
       clearTimeout(this.moveTimeout);
       this.moveTimeout = undefined;
     }
+    const previousIncreasing = this.moveIncreasing;
+    this.moveIncreasing = null;
 
     this.state.targetPosition = target;
 
     if (this.state.currentPosition === target) {
-      // The motor may still be physically running (target caught up with the
-      // estimated position mid-move): it must be stopped explicitly.
-      if (wasMoving && emitRf) {
-        this.sendCommand('stop');
+      // The motor may still be physically running — or about to (frame in flight):
+      // it must be countered with an explicit stop.
+      if ((wasMoving || wasPending) && emitRf) {
+        this.sendStopExpectingMotion(previousIncreasing ?? undefined);
       }
-      this.moveIncreasing = null;
       this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
       this.syncCharacteristics(wasMoving);
       return;
@@ -304,11 +342,59 @@ export class ShutterAccessory {
         ? this.platform.Characteristic.PositionState.INCREASING
         : this.platform.Characteristic.PositionState.DECREASING,
     );
+    this.syncCharacteristics();
 
-    if (emitRf) {
-      this.sendCommand(command);
+    const previousPosition = this.state.currentPosition;
+
+    const begin = () => {
+      if (generation !== this.moveGeneration) {
+        return; // superseded by a newer command
+      }
+      this.clearAckFallback();
+      this.pendingAck = false;
+      this.beginTiming(target, increasing, fullDurationSeconds, emitRf);
+    };
+
+    if (!emitRf) {
+      // Mirrored group move: no RF of our own, the clock starts now.
+      begin();
+      return;
     }
 
+    // Transmission-aware chronometry: the run timer only starts once the box confirms
+    // the frame went out (ACK) — queue delays no longer eat into the timing. A frame
+    // that definitively cannot be transmitted rolls the simulation back: the state
+    // never pretends a motor moved when nothing was emitted.
+    this.pendingAck = true;
+    this.sendCommand(command, {
+      onAck: begin,
+      onFail: () => {
+        if (generation !== this.moveGeneration) {
+          return;
+        }
+        this.clearAckFallback();
+        this.pendingAck = false;
+        this.platform.log.error(
+          `[${this.shutter.name}] "${command}" could not be transmitted — rolling the simulated position back to ${previousPosition}%.`,
+        );
+        this.state.currentPosition = previousPosition;
+        this.state.targetPosition = previousPosition;
+        this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
+        this.syncCharacteristics(true);
+      },
+    });
+    // Safety net: a mute box must not freeze HomeKit in "moving" forever.
+    this.ackFallbackTimer = setTimeout(() => {
+      if (generation !== this.moveGeneration) {
+        return;
+      }
+      this.platform.log.warn(`[${this.shutter.name}] No RFXtrx response after 4 s — starting the run timer anyway.`);
+      begin();
+    }, 4000);
+  }
+
+  /** Starts the calibrated run clock (called at ACK time for RF-emitting moves). */
+  private beginTiming(target: number, increasing: boolean, fullDurationSeconds: number, emitRf: boolean) {
     this.moveIncreasing = increasing;
     this.moveStartedAt = Date.now();
     this.moveStartPosition = this.state.currentPosition;
@@ -321,26 +407,62 @@ export class ShutterAccessory {
     // target is a full open/close we don't need to (and shouldn't) send an explicit
     // "stop": we just let the full run finish and mark the state as STOPPED for HomeKit.
     const sendStopCommand = emitRf && target !== 0 && target !== 100;
-    this.scheduleStop(moveDurationMs, target, sendStopCommand);
-
-    this.syncCharacteristics();
+    this.scheduleStop(moveDurationMs, target, sendStopCommand, increasing);
   }
 
-  private scheduleStop(delayMs: number, finalPosition: number, sendStopCommand = false) {
+  private scheduleStop(delayMs: number, finalPosition: number, sendStopCommand = false, increasing?: boolean) {
     this.moveTimeout = setTimeout(() => {
+      this.moveTimeout = undefined;
       if (sendStopCommand) {
-        this.sendCommand('stop');
+        this.sendStopExpectingMotion(increasing);
       }
       this.state.currentPosition = finalPosition;
-      this.moveTimeout = undefined;
       this.moveIncreasing = null;
       this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
       this.syncCharacteristics(true);
     }, delayMs);
   }
 
+  /**
+   * Sends a stop for a motor believed to be in motion. If the stop definitively cannot
+   * be transmitted, the motor will run to its end of travel: the state assumes that
+   * extreme instead of keeping a position the motor blew past.
+   */
+  private sendStopExpectingMotion(increasing?: boolean) {
+    const generation = this.moveGeneration;
+    this.sendCommand('stop', {
+      onFail: () => {
+        if (increasing === undefined || generation !== this.moveGeneration) {
+          return;
+        }
+        const extreme = increasing ? 100 : 0;
+        this.platform.log.error(
+          `[${this.shutter.name}] stop frame lost — the motor will run to its end of travel; assuming ${extreme}%.`,
+        );
+        this.state.currentPosition = extreme;
+        this.state.targetPosition = extreme;
+        this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
+        this.syncCharacteristics(true);
+      },
+    });
+  }
+
+  private clearAckFallback() {
+    if (this.ackFallbackTimer) {
+      clearTimeout(this.ackFallbackTimer);
+      this.ackFallbackTimer = undefined;
+    }
+  }
+
+  private clearDispatchTimers() {
+    for (const timer of this.dispatchTimers) {
+      clearTimeout(timer);
+    }
+    this.dispatchTimers = [];
+  }
+
   get isMoving(): boolean {
-    return this.moveTimeout !== undefined;
+    return this.moveTimeout !== undefined || this.pendingAck;
   }
 
   private stopMovement() {
@@ -349,15 +471,20 @@ export class ShutterAccessory {
     // a stray RTS "stop" frame on an idle motor triggers its "my" favourite move.
     const anyMemberMoving = (this.shutter.members ?? [])
       .some((id) => this.platform.shutterHandler(id)?.isMoving === true);
-    if (!this.moveTimeout && !anyMemberMoving) {
+    if (!this.moveTimeout && !this.pendingAck && !anyMemberMoving) {
       return;
     }
+    this.moveGeneration++;
+    this.clearAckFallback();
+    this.pendingAck = false;
+    this.clearDispatchTimers();
+    const previousIncreasing = this.moveIncreasing;
     if (this.moveTimeout) {
       clearTimeout(this.moveTimeout);
       this.moveTimeout = undefined;
       this.state.currentPosition = this.estimateCurrentPosition();
     }
-    this.sendCommand('stop');
+    this.sendStopExpectingMotion(previousIncreasing ?? undefined);
     this.state.targetPosition = this.state.currentPosition;
     this.moveIncreasing = null;
     this.setPositionState(this.platform.Characteristic.PositionState.STOPPED);
@@ -389,20 +516,64 @@ export class ShutterAccessory {
     return id >= 0x00001 && id <= 0xfffff && unitCode >= 0 && unitCode <= 4;
   }
 
-  private sendCommand(command: RtsDirection | 'stop') {
+  /**
+   * Sends an RFY frame and follows its fate through the box's response:
+   * - ack → onAck (and the fault flag clears)
+   * - refusal, or missing confirmation on a movement command → automatic re-send
+   *   (up to 2 times, 500 ms apart; re-sending up/down is harmless)
+   * - missing confirmation on a *stop* → treated as sent, never re-sent (a duplicate
+   *   stop reaching an idle motor triggers its "my" favourite move)
+   * - definitive failure → StatusFault raised + onFail
+   */
+  private sendCommand(
+    command: RtsDirection | 'stop',
+    hooks?: { onAck?: () => void; onFail?: () => void },
+    retriesLeft = 2,
+  ) {
     if (!this.operational || !this.rfy) {
       this.platform.log.warn(`[${this.shutter.name}] Ignoring "${command}": shutter is not operational (bad deviceId or RFXtrx unavailable).`);
+      hooks?.onFail?.();
       return;
     }
     this.platform.log.debug(`[${this.shutter.name}] RFY command: ${command} (${this.shutter.deviceId})`);
+    let seqnbr: unknown;
     try {
-      const seqnbr = this.rfy.doCommand(this.shutter.deviceId, command);
-      if (typeof seqnbr === 'number') {
-        this.platform.registerPendingCommand(seqnbr, this.shutter.name, command);
-      }
+      seqnbr = this.rfy.doCommand(this.shutter.deviceId, command);
     } catch (err) {
       this.platform.log.error(`[${this.shutter.name}] RFY command "${command}" failed:`, (err as Error)?.message ?? err);
+      this.setFault(true);
+      hooks?.onFail?.();
+      return;
     }
+    if (typeof seqnbr !== 'number') {
+      // No sequence tracking available: stay optimistic (pre-2.x lib behaviour).
+      hooks?.onAck?.();
+      return;
+    }
+    this.platform.registerPendingCommand(seqnbr, this.shutter.name, command, (outcome: CommandOutcome) => {
+      if (outcome === 'ack' || (outcome === 'ambiguous' && command === 'stop')) {
+        if (outcome === 'ack') {
+          this.setFault(false);
+        }
+        hooks?.onAck?.();
+        return;
+      }
+      if (retriesLeft > 0) {
+        this.platform.log.warn(`[${this.shutter.name}] Re-sending "${command}" in 500 ms (${retriesLeft} attempt(s) left).`);
+        setTimeout(() => this.sendCommand(command, hooks, retriesLeft - 1), 500);
+        return;
+      }
+      this.setFault(true);
+      hooks?.onFail?.();
+    });
+  }
+
+  private setFault(faulted: boolean) {
+    if (this.fault === faulted) {
+      return;
+    }
+    this.fault = faulted;
+    this.service.updateCharacteristic(this.platform.Characteristic.StatusFault, faulted ? 1 : 0);
   }
 
   private setPositionState(state: number) {

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 (2026-07-15) — « transmission-aware »
+
+- **Chronométrage ancré sur l'ACK** : le chrono d'un mouvement démarre quand le RFXtrx
+  confirme l'émission de la trame, plus au moment de l'envoi — les retards de file
+  d'attente du boîtier ne faussent plus les positions.
+- **Ré-émission automatique** : une trame refusée (NAK, « Unknown RFY remote ID ») ou
+  non confirmée est ré-émise jusqu'à 2 fois (500 ms d'intervalle). Exception de
+  sécurité : un `stop` sans confirmation n'est **jamais** ré-émis (un doublon atteignant
+  un moteur déjà arrêté déclencherait sa position favorite « my »).
+- **Rollback de simulation** : après échec définitif, la position simulée revient à sa
+  valeur d'avant la commande — l'état ne prétend plus qu'un moteur a bougé quand rien
+  n'a été émis — et la caractéristique **`StatusFault`** est levée (visible dans Eve),
+  effacée à la prochaine émission confirmée.
+- **Stop perdu = butée assumée** : si un `stop` chronométré ne peut définitivement pas
+  être émis, le moteur finira sa course ; l'état reflète l'extrémité du trajet au lieu
+  de conserver une position dépassée.
+- **Filet anti-gel** : boîtier muet → le chrono démarre quand même après 4 s (avertissement).
+- **Dispatch de groupe cadencé** : les commandes individuelles d'un groupe partent
+  espacées de 250 ms pour ne jamais engorger la file d'émission du boîtier (sans effet
+  sur la précision : chaque store est chronométré sur son propre ACK).
+
 ## 0.3.2 (2026-07-15)
 
 - `config.schema.json` conforme au standard JSON Schema : les `"required": true` par

@@ -13,6 +13,16 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { ShutterAccessory } from './accessories/shutterAccessory';
 
 /**
+ * Outcome of an RFY command, as reported by the RFXtrx:
+ * - 'ack': the box confirmed the radio transmission;
+ * - 'ambiguous': no confirmation arrived (the frame may or may not have aired) —
+ *   callers must NEVER blind-retry on this (a duplicate "stop" on a motor that DID
+ *   receive the first one would trigger its "my" favourite-position move);
+ * - 'failed': the box refused the command (unknown remote id, NAK): nothing was sent.
+ */
+export type CommandOutcome = 'ack' | 'ambiguous' | 'failed';
+
+/**
  * One entry of the "shutters" array in config.json.
  */
 export interface ShutterConfig {
@@ -51,9 +61,14 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
   /** Live shutter handlers by deviceId — lets group accessories reach their members. */
   public readonly shutterHandlers: Map<string, ShutterAccessory> = new Map();
 
-  /** Commands awaiting the box's response, keyed by RFXtrx sequence number, so that
-   *  responses can be attributed to the shutter that sent them in the logs. */
-  private readonly pendingCommands: Map<number, { shutter: string; command: string; sentAt: number }> = new Map();
+  /** Commands awaiting the box's response, keyed by RFXtrx sequence number: used to
+   *  attribute responses in the logs and to feed the outcome back to the sender. */
+  private readonly pendingCommands: Map<number, {
+    shutter: string;
+    command: string;
+    sentAt: number;
+    onResult?: (outcome: CommandOutcome) => void;
+  }> = new Map();
 
   constructor(
     public readonly log: Logger,
@@ -85,13 +100,18 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
         const pending = this.pendingCommands.get(seqnbr);
         this.pendingCommands.delete(seqnbr);
         const origin = pending ? `[${pending.shutter}] RFY "${pending.command}"` : `RFY command (seq ${seqnbr})`;
+        let outcome: CommandOutcome;
         if (responseCode === 0 || responseCode === 1) {
+          outcome = 'ack';
           this.log.debug(`${origin} → ${message}`);
         } else if (responseCode === 6) {
+          outcome = 'ambiguous';
           this.log.warn(`${origin} → no confirmation from the RFXtrx (${message}) — the frame may or may not have been transmitted.`);
         } else {
+          outcome = 'failed';
           this.log.warn(`${origin} → NOT transmitted: ${message} (code ${responseCode}) — the motor did not receive this order.`);
         }
+        pending?.onResult?.(outcome);
       });
 
       this.rfxcom.initialise(() => {
@@ -122,14 +142,14 @@ export class SomfyRTSShuttersPlatform implements DynamicPlatformPlugin {
   }
 
   /** Remember which shutter sent the command carrying this sequence number. */
-  registerPendingCommand(seqnbr: number, shutter: string, command: string) {
+  registerPendingCommand(seqnbr: number, shutter: string, command: string, onResult?: (outcome: CommandOutcome) => void) {
     const now = Date.now();
     for (const [key, value] of this.pendingCommands) {
       if (now - value.sentAt > 60000) {
         this.pendingCommands.delete(key);
       }
     }
-    this.pendingCommands.set(seqnbr, { shutter, command, sentAt: now });
+    this.pendingCommands.set(seqnbr, { shutter, command, sentAt: now, onResult });
   }
 
   shutterHandler(deviceId: string): ShutterAccessory | undefined {

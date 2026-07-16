@@ -37,7 +37,11 @@ réduit aux seuls volets (pas de capteurs météo, pas de switches on/off), avec
   n'ont pas de retour de position réel) ;
 - position simulée **persistée** entre deux redémarrages de Homebridge ;
 - gestion des interruptions (nouvelle commande envoyée pendant qu'un volet bouge déjà) ;
-- caractéristique `HoldPosition` optionnelle pour un stop manuel (app Eve / automatisation).
+- caractéristique `HoldPosition` optionnelle pour un stop manuel (app Eve / automatisation) ;
+- pilotage **conscient de l'émission** : chronométrage ancré sur l'accusé d'émission du
+  RFXtrx, ré-émission automatique des trames refusées, rollback de la position simulée
+  en cas d'échec définitif (l'état ne ment jamais) + caractéristique `StatusFault` ;
+- accessoires de **groupe** au comportement stateful (voir la section dédiée).
 
 ## ⚠️ Bug corrigé par rapport au plugin d'origine
 
